@@ -51,7 +51,7 @@ int main (int argc, char *argv[])
 	}
 
 	if (mode == 0){
-		compress(f_in, f_out, 10);
+		compress_file(f_in, f_out, 16400);
 	} else if (mode == 1){
 		expand_chunks(f_in, f_out, argv[4]);
 	}

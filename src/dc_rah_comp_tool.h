@@ -18,6 +18,6 @@
  * @return 	Nothing
  */
 void expand_chunks(FILE* f_infile, FILE* f_outfile, const char* mode);
-void compress(uint8_t* p_source, uint8_t* p_compressed, int size);
+void compress_file(FILE* f_infile, FILE* f_outfile, size_t chunk_size);
 
 #endif /* DC_RAH_COMP_TOOL_H_ */
