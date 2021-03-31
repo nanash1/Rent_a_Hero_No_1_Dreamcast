@@ -9,6 +9,127 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include "buffer.h"
+
+#define CHUNK_BASE 0x86c							/* Base pointer of chunk table */
+
+typedef struct {
+	uint32_t start;									/* Chunk start address. */
+	uint32_t length;								/* Chunk size in bytes. */
+} chunk_t;
+
+typedef struct {
+	FILE* file;										/* File pointer. */
+	size_t pos;										/* Current position in chunks. */
+	size_t fsize;									/* File size. */
+	size_t chnk_num;								/* Number of chunks. */
+} chunk_table_t;
+
+/**
+ * @brief	Initialize chunk table structure.
+ * @param	file		Pointer to *.CGD file
+ * @return	Chunk table structure.
+ */
+static chunk_table_t chnktbl_init(FILE* file)
+{
+	uint32_t first_offset;
+
+	chunk_table_t rtn;
+	rtn.file = file;
+	rtn.pos = 0;
+
+	fseek(file, 0, SEEK_END);
+	rtn.fsize = ftell(file);
+	fseek(file, 0, SEEK_SET);
+
+	fseek(file, CHUNK_BASE+4, SEEK_SET);
+	fread(&first_offset, sizeof(uint32_t), 1, file);
+	rtn.chnk_num = first_offset / 8;
+
+	return rtn;
+}
+
+/**
+ * @brief	Get next chunk from chunk table.
+ * @param	chunk_table		Pointer to chunk table structure.
+ * @param	eof				When end of current file is reached a 1 is written to this variable.
+ * @return	Chunk information structure.
+ */
+static chunk_t chnktbl_next_chunk(chunk_table_t* chunk_table, int* eof)
+{
+	chunk_t rtn;
+
+	uint32_t chunk_idx;
+	uint32_t chunk_pos;
+	fseek(chunk_table->file, CHUNK_BASE+(chunk_table->pos*8), SEEK_SET);
+	fread(&chunk_idx, sizeof(uint32_t), 1, chunk_table->file);
+	fread(&chunk_pos, sizeof(uint32_t), 1, chunk_table->file);
+	chunk_table->pos++;
+	rtn.start = chunk_pos+CHUNK_BASE;
+
+	*eof = chunk_idx == 1;
+
+	if (chunk_table->pos > chunk_table->chnk_num){
+		rtn.length = chunk_table->fsize - rtn.start;
+	} else {
+		fread(&chunk_idx, sizeof(uint32_t), 1, chunk_table->file);
+		fread(&chunk_pos, sizeof(uint32_t), 1, chunk_table->file);
+		rtn.length = chunk_pos + CHUNK_BASE - rtn.start;
+	}
+
+	return rtn;
+}
+
+/**
+ * @brief	Seeks file index in chunk table.
+ * @param	chunk_table		Pointer to chunk table structure.
+ * @param	file_idx		Index of the file.
+ * @return	Nothing.
+ */
+static void chnktbl_file_seek(chunk_table_t* chunk_table, int file_idx)
+{
+	uint32_t chunk_idx;
+	uint32_t chunk_pos;
+	chunk_table->pos = 0;
+	fseek(chunk_table->file, CHUNK_BASE, SEEK_SET);
+	fread(&chunk_idx, sizeof(uint32_t), 1, chunk_table->file);
+	fread(&chunk_pos, sizeof(uint32_t), 1, chunk_table->file);
+
+	while (file_idx){
+		chunk_table->pos++;
+		if (chunk_table->pos > chunk_table->chnk_num)
+			break;
+		if (chunk_idx == 1)
+			file_idx--;
+		fread(&chunk_idx, sizeof(uint32_t), 1, chunk_table->file);
+		fread(&chunk_pos, sizeof(uint32_t), 1, chunk_table->file);
+	}
+}
+
+/**
+ * @brief	Counts the total number of files in the chunk table.
+ * @param	chunk_table		Pointer to chunk table structure.
+ * @return	Number of files.
+ */
+static int chnktbl_cnt_file(chunk_table_t* chunk_table)
+{
+	int rtn = 0;
+	int pos = 0;
+	uint32_t chunk_idx;
+	uint32_t chunk_pos;
+	fseek(chunk_table->file, CHUNK_BASE, SEEK_SET);
+	fread(&chunk_idx, sizeof(uint32_t), 1, chunk_table->file);
+	fread(&chunk_pos, sizeof(uint32_t), 1, chunk_table->file);
+	while (pos < chunk_table->chnk_num){
+		pos++;
+		if (chunk_idx == 1){
+			rtn++;
+		}
+		fread(&chunk_idx, sizeof(uint32_t), 1, chunk_table->file);
+		fread(&chunk_pos, sizeof(uint32_t), 1, chunk_table->file);
+	}
+	return rtn;
+}
 
 /**
  * @brief 	Expands a chunk from the compressed stream.
@@ -19,20 +140,13 @@
 static void expand_chunk(uint8_t* p_compressed, uint8_t* p_expanded, int size_expanded)
 {
 	/* Declare variables. */
-	uint8_t rb_dict[4095];											// ring buffer dictionary from decoded data
+	ringb_t dict = ringb_init();
 	int pos_compressed = 0;											// position in compressed stream; first 4 bytes are the expanded size
 	int pos_expanded = 0;											// position in the expanded stream
-	int pos_dict = 4078;											// dictionary position; starts with 4078 zeros pre-loaded
-	int rb_mask = 0xfff;											// ring buffer mask
 	uint8_t data_byte, temp_byte1, temp_byte2, dict_byte;
 	uint16_t ctrl_word;
-	int i, cpy_len, cpy_pos;
-
-	/* Initialize variables and fill the first 4078 entries
-	 * of the dictionary with zeros. */
+	int cpy_len, cpy_pos;
 	ctrl_word = 0;													// the control word determines the number of bytes to copy
-	for(i=0;i<4078;i++)
-		rb_dict[i] = 0;
 
 	while(pos_expanded < size_expanded){
 		ctrl_word >>= 1;											// shift out lsb of control word
@@ -50,8 +164,7 @@ static void expand_chunk(uint8_t* p_compressed, uint8_t* p_expanded, int size_ex
 		if (ctrl_word & 0x1){
 			data_byte = p_compressed[pos_compressed++];
 			p_expanded[pos_expanded++] = data_byte;
-			rb_dict[pos_dict] = data_byte;
-			pos_dict = (pos_dict+1) & rb_mask;
+			ringb_insert(&dict, data_byte);
 		} else {
 
 			/* Read length-distance pair. */
@@ -63,11 +176,9 @@ static void expand_chunk(uint8_t* p_compressed, uint8_t* p_expanded, int size_ex
 
 			/* Copy data from dictionary. */
 			while (cpy_len-- > -1){
-				cpy_pos &= rb_mask;
-				dict_byte = rb_dict[cpy_pos++];
+				dict_byte = ringb_get(&dict, cpy_pos++);
 				p_expanded[pos_expanded++] = dict_byte;
-				rb_dict[pos_dict] = dict_byte;
-				pos_dict = (pos_dict+1) & rb_mask;
+				ringb_insert(&dict, dict_byte);
 			}
 		}
 	}
@@ -76,15 +187,17 @@ static void expand_chunk(uint8_t* p_compressed, uint8_t* p_expanded, int size_ex
 /**
  * @brief	Expands chunks from *.CGD file
  * @param	f_infile		Input File.
- * @param	f_outfile		Output File.
  * @param	mode			Mode selection string. "start:end" or "all".
- * @return 	Nothing
+ * @return 	Status
  */
-void expand_chunks(FILE* f_infile, FILE* f_outfile, const char* mode)
+int expand_files(FILE* f_infile, const char* mode)
 {
-	int size_expanded;
-	size_t chunk_start, chunk_end, i, start, end;
-	uint32_t temp;
+	FILE* f_outfile;
+	char fname[12];
+	int eof = 0;
+	uint32_t size_expanded;
+	int start, end;
+	chunk_t chunk;
 	uint8_t* p_compressed;
 	uint8_t* p_expanded;
 
@@ -93,50 +206,54 @@ void expand_chunks(FILE* f_infile, FILE* f_outfile, const char* mode)
 	char* str_start = strtok(_mode, ":");
 	char* str_end = strtok(NULL, ":");
 
+	chunk_table_t chunk_table = chnktbl_init(f_infile);
 	if (strcmp(str_start, "all")){
 
 		if (strlen(str_start) == 0)
 			start = 0;
 		else
-			start = (size_t) atoi(str_start);
+			start = atoi(str_start);
 
 		if (strlen(str_start) == 0)
 			end = 10;
 		else
-			end = (size_t) atoi(str_end);
+			end = atoi(str_end);
 	} else {
 		start = 0;
-		end = 10;
+		end = chnktbl_cnt_file(&chunk_table);
 	}
+	chnktbl_file_seek(&chunk_table, start);
 
-	/* Seek first selected chunk. */
-	fseek(f_infile, 0x870+start*8, SEEK_SET);
-	fread(&temp, sizeof(uint32_t), 1, f_infile);
-	chunk_start = (size_t) temp + 0x86c;
+	for (int image = start; image < end; image++){
+		sprintf(fname, "%04d.PVR", image);
 
-	for (i=start+1;i<end+1;i++){
+		if ((f_outfile=fopen(fname,"wb"))==NULL) {
+			printf("Error opening output %s\n",fname);
+			return EXIT_FAILURE;
+		}
 
-		/* Seek next chunk to determine compressed size. */
-		fseek(f_infile, 0x870+i*8, SEEK_SET);
-		fread(&temp, sizeof(uint32_t), 1, f_infile);
-		chunk_end = (size_t) temp + 0x86c;
+		while (!eof){
+			chunk = chnktbl_next_chunk(&chunk_table, &eof);
 
-		/* Read expanded size. */
-		fseek(f_infile, chunk_start, SEEK_SET);
-		fread(&temp, sizeof(uint32_t), 1, f_infile);
-		size_expanded = (int) temp;
+			/* Read expanded size. */
+			fseek(f_infile, chunk.start, SEEK_SET);
+			fread(&size_expanded, sizeof(uint32_t), 1, f_infile);
 
-		/* Allocate memory. */
-		p_compressed = malloc(chunk_end-chunk_start);
-		fread(p_compressed, sizeof(uint8_t), chunk_end-chunk_start, f_infile);
-		p_expanded = calloc(size_expanded, sizeof(uint8_t));
+			/* Allocate memory. */
+			p_compressed = malloc(chunk.length);
+			fread(p_compressed, sizeof(uint8_t), chunk.length, f_infile);
+			p_expanded = calloc((size_t) size_expanded, sizeof(uint8_t));
 
-		/* Expand chunk and write to file. */
-		expand_chunk(p_compressed, p_expanded, size_expanded);
-		fwrite(p_expanded, sizeof(uint8_t), size_expanded, f_outfile);
+			/* Expand chunk and write to file. */
+			expand_chunk(p_compressed, p_expanded, (int) size_expanded);
+			fwrite(p_expanded, sizeof(uint8_t), size_expanded, f_outfile);
 
-		chunk_start = chunk_end;
-		free(p_compressed);
-		free(p_expanded);
+			free(p_compressed);
+			free(p_expanded);
+		}
+
+		eof = 0;
+		fclose(f_outfile);
 	}
+	return EXIT_SUCCESS;
 }

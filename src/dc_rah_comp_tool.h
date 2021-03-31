@@ -13,11 +13,11 @@
 /**
  * @brief	Expands chunks from *.CGD file
  * @param	f_infile		Input File.
- * @param	f_outfile		Output File.
- * @param	mode			Mode selection string. "start-end" or "all".
- * @return 	Nothing
+ * @param	mode			Mode selection string. "start:end" or "all".
+ * @return 	Status
  */
-void expand_chunks(FILE* f_infile, FILE* f_outfile, const char* mode);
+int expand_files(FILE* f_infile, const char* mode);
+
 void compress_file(FILE* f_infile, FILE* f_outfile, size_t chunk_size);
 
 #endif /* DC_RAH_COMP_TOOL_H_ */

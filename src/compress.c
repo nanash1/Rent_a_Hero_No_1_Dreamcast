@@ -7,56 +7,51 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include "buffer.h"
+
 
 typedef struct {
 	int len;
 	int pos;
 } match_t;
 
-typedef struct {
-	uint8_t* p_data;
-	int head;
-	int tail;
-} ringb_t;
-
-static match_t find_match(ringb_t dict, ringb_t lookahead)
+static match_t find_match(ringb_t dict, winb_t lookahead)
 {
-	int match_start, match_end;
+	int lookahead_empty = 0;
+	int dict_empty = 0;
+	int full_match = 1;
+	ringb_t _dict;
 	match_t match;
 	match.len = 0;
 
-	/* Compare dict and lookahead data and find the longest match */
-	match_start = lookahead.tail;
-	while (1){
-		if ((lookahead.tail == lookahead.head) || (dict.tail == dict.head))		// don't look outside of the buffer area
-			return match;
-
-		if (dict.p_data[dict.tail] != lookahead.p_data[lookahead.tail])
+	/* Compare dict and lookahead data and find the longest match. */
+	_dict = dict;
+	while (!dict_empty && !lookahead_empty){
+		if (ringb_pop(&dict, &dict_empty) != winb_pop(&lookahead, &lookahead_empty)){
+			full_match = 0;
 			break;
+		}
 		match.len++;
-
-		/* Wrap the buffers around. */
-		dict.tail = (dict.tail+1) & 0xfff;
-		lookahead.tail = (lookahead.tail+1) & 0xfff;
 	}
 
-//	if (match.len > 1){
-//		match_end = lookahead.tail;
-//		lookahead.tail = match_start;
-//		while (dict.p_data[dict.tail] == lookahead.p_data[lookahead.tail]){
-//			match.len++;
-//			dict.tail = (dict.tail+1) & 0xfff;
-//			lookahead.tail = (lookahead.tail+1) & 0xfff;
-//
-//			if (lookahead.tail == match_end)
-//				lookahead.tail = match_start;
-//		}
-//	}
+	/* Look for repeats. */
+	if (full_match){
+		dict = _dict;
+		while (!lookahead_empty){
+
+			if (ringb_pop(&dict, &dict_empty) != winb_pop(&lookahead, &lookahead_empty))
+				break;
+			match.len++;
+
+			if (dict_empty)
+				dict = _dict;
+		}
+	}
 
 	return match;
 }
 
-static match_t find_best_match(ringb_t dict, ringb_t lookahead)
+static match_t find_best_match(ringb_t dict, winb_t lookahead)
 {
 	match_t best_match, match;
 	best_match.len = 0;
@@ -65,7 +60,7 @@ static match_t find_best_match(ringb_t dict, ringb_t lookahead)
 
 	/* Go through the entire dictionary and test
 	 * each position for the best match */
-	while (match_dict.tail != dict.tail){
+	while (match_dict.tail != match_dict.head){
 		match = find_match(match_dict, lookahead);
 
 		if (match.len > best_match.len) {
@@ -85,36 +80,30 @@ static match_t find_best_match(ringb_t dict, ringb_t lookahead)
 	return best_match;
 }
 
-static void compress_chunk(uint8_t* p_source, uint8_t* p_compressed, unsigned int size)
+static int compress_chunk(uint8_t* p_source, uint8_t* p_compressed, unsigned int size_src)
 {
-	int i, cntr;
+	uint8_t* p_comp_base = p_compressed;
+	int is_empty = 0;
+	int padding, cntr;
 	uint16_t ctrl_word;													// control word to indicate when to copy data from dict
 	uint8_t* p_ctrl_word;												// pointer to next control word in compressed stream
 	match_t match;														// match between dict and lookahead buffer
+	uint8_t temp_byte;
 
 	/* Initialize ring buffers */
-	uint8_t rb_dict_data[4095];											// ring buffer dictionary data from decoded data
-	for(i=0;i<4078;i++)													// pre-load buffer with 4078 zeros
-		rb_dict_data[i] = 0;
-	ringb_t dict;														// dictionary ring buffer
-	dict.p_data = rb_dict_data;
-	dict.head = 4078;
-	dict.tail = 0;
-	ringb_t lookahead;													// lookahead ring buffer
-	lookahead.p_data = p_source;
-	lookahead.head = 4095;
-	lookahead.tail = 0;
-	int rb_mask = 0xfff;												// ring buffer mask
+	ringb_t dict = ringb_init();
+	winb_t lookahead = winb_init(p_source, size_src);
 
 	/* Write size to compressed stream. */
-	*((uint32_t*) p_compressed) = (uint32_t) size;
+	*((uint32_t*) p_compressed) = (uint32_t) size_src;
 	p_compressed += 4;
 
 	ctrl_word = 0;
 	p_ctrl_word = p_compressed;
 	p_compressed++;
-	cntr = 0;
-	for (i=0;i<16;i++){
+	cntr = 8;
+	while (!is_empty){
+
 		match = find_best_match(dict, lookahead);						// search best match between dict and lookahead
 
 		if (match.len > 2){
@@ -126,44 +115,40 @@ static void compress_chunk(uint8_t* p_source, uint8_t* p_compressed, unsigned in
 
 			/* Copy matched data to dict. */
 			while (match.len--){
-				dict.p_data[dict.head] = *lookahead.p_data++;
-				dict.head = (dict.head + 1) & rb_mask;
-				size--;
+				ringb_insert(&dict, winb_advance(&lookahead, &is_empty));
 			}
 
 		} else {
 			/* Indicate unmatched byte in control word and
 			 * write to dict. */
 			ctrl_word |= 0x100;
-			*p_compressed++ = *lookahead.p_data;
-			dict.p_data[dict.head] = *lookahead.p_data;
-			dict.head = (dict.head + 1) & rb_mask;
-			if (dict.head == dict.tail)
-				dict.tail = (dict.tail + 1) & rb_mask;
-			lookahead.p_data++;
-			size--;
+			temp_byte = winb_advance(&lookahead, &is_empty);
+			*p_compressed++ = temp_byte;
+			ringb_insert(&dict, temp_byte);
 		}
 		ctrl_word >>= 1;
 
 		/* Control word is written every 8 entries. */
-		cntr++;
-		if (cntr == 8){
-			cntr = 0;
+		if (!(--cntr)){
+			cntr = 8;
 			*p_ctrl_word = (uint8_t) (ctrl_word & 0xff);
 			p_ctrl_word = p_compressed;
 			p_compressed++;
 		}
-
-		/* Adjust buffer size to data size. */
-		if (size < lookahead.head)
-			lookahead.head = (int) size;
-
 	}
+	*p_ctrl_word = (uint8_t) ((ctrl_word >> cntr) & 0xff);
+	padding = (p_compressed - p_comp_base) % 4;
+	padding = (padding > 0) ? 4 - padding : 0;
+	while (padding--)
+		*p_compressed++ = 0;
+
+	return p_compressed - p_comp_base;
 }
 
 void compress_file(FILE* f_infile, FILE* f_outfile, size_t chunk_size)
 {
 	int num_chunks, i;
+	int comp_chunk_size;
 	size_t f_size;
 	uint8_t* p_source;
 	uint8_t* p_compressed;
@@ -173,7 +158,7 @@ void compress_file(FILE* f_infile, FILE* f_outfile, size_t chunk_size)
 	f_size = ftell(f_infile);
 	fseek(f_infile, 0, SEEK_SET);
 
-	num_chunks = 1; //(int) (f_size/chunk_size);
+	num_chunks = (int) (f_size/chunk_size);
 
 	for (i=0;i<num_chunks;i++){
 
@@ -182,8 +167,8 @@ void compress_file(FILE* f_infile, FILE* f_outfile, size_t chunk_size)
 		fread(p_source, sizeof(uint8_t), chunk_size, f_infile);
 		p_compressed = malloc(chunk_size*2);
 
-		compress_chunk(p_source, p_compressed, (unsigned int) chunk_size);
-		fwrite(p_compressed, sizeof(uint8_t), 32, f_outfile);
+		comp_chunk_size = compress_chunk(p_source, p_compressed, (unsigned int) chunk_size);
+		fwrite(p_compressed, sizeof(uint8_t), comp_chunk_size, f_outfile);
 
 		free(p_compressed);
 		free(p_source);
