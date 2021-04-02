@@ -13,11 +13,11 @@
 
 #include "dc_rah_comp_tool.h"
 
-static void inline _print_usage(void)
+static void inline _print_usage(const char* app)
 {
 	printf("\n");
-	printf("Usage: dc_rah_comp_tool.exe compress infile outfile\n");
-	printf("Usage: dc_rah_comp_tool.exe expand infile chunks\n");
+	printf("Usage: %s compress folder outfile\n", app);
+	printf("Usage: %s expand chunks infile [folder]\n", app);
 }
 
 int main (int argc, char *argv[])
@@ -26,47 +26,55 @@ int main (int argc, char *argv[])
 	FILE* f_out;
 	int mode = -1;
 	int rtn = EXIT_SUCCESS;
-	char* str_f_in;
-	char* str_f_out;
+	size_t slen;
+	char sfolder[2048] = "";
+	char sfile[2048] = "";
 	char* ctrl;
 
 	if (argc < 3){
-		_print_usage();
+		_print_usage(argv[0]);
 		return EXIT_FAILURE;
 	} else {
 		if (strcmp(argv[1], "compress") == 0){
 			mode = 0;
-			str_f_in = argv[2];
-			str_f_out = argv[3];
+			strcpy(sfolder, argv[2]);
+			strcpy(sfile, argv[3]);
 		} else if (strcmp(argv[1], "expand") == 0){
 			mode = 1;
-			str_f_in = argv[3];
 			ctrl = argv[2];
+			strcpy(sfile, argv[3]);
+			if (argc > 4)
+				strcpy(sfolder, argv[4]);
 		} else {
-			_print_usage();
+			_print_usage(argv[0]);
 			return EXIT_FAILURE;
 		}
 	}
 
-	if ((f_in=fopen(str_f_in,"rb"))==NULL) {
-		printf("Error opening input %s\n",str_f_in);
+	slen = strlen(sfolder);
+	if (slen > 0){
+		if (!(!strcmp(sfolder+slen-1, "/") || !strcmp(sfolder+slen-2, "\\"))){
+			strcat(sfolder, "/");
+		}
+	}
+
+	if ((mode == 1) && (f_in=fopen(sfile,"rb"))==NULL) {
+		printf("Error opening input %s\n",sfile);
 		return EXIT_FAILURE;
 	}
 
-	if ((mode == 0) && ((f_out=fopen(str_f_out,"wb"))==NULL)) {
-		printf("Error opening output %s\n",str_f_out);
-		fclose(f_in);
+	if ((mode == 0) && (f_out=fopen(sfile,"wb"))==NULL) {
+		printf("Error opening output %s\n",sfile);
 		return EXIT_FAILURE;
 	}
 
 	if (mode == 0){
-		compress_file(f_in, f_out, 16400);
+		compress_folder(f_out, sfolder);
+		fclose(f_out);
 	} else if (mode == 1){
-		rtn = expand_files(f_in, ctrl);
+		rtn = expand_files(f_in, ctrl, sfolder);
+		fclose(f_in);
 	}
 
-	fclose(f_in);
-	if (mode == 0)
-		fclose(f_out);
 	return rtn;
 }

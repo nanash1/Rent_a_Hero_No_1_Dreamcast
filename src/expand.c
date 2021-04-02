@@ -190,10 +190,10 @@ static void expand_chunk(uint8_t* p_compressed, uint8_t* p_expanded, int size_ex
  * @param	mode			Mode selection string. "start:end" or "all".
  * @return 	Status
  */
-int expand_files(FILE* f_infile, const char* mode)
+int expand_files(FILE* f_infile, const char* mode, const char* folder)
 {
 	FILE* f_outfile;
-	char fname[12];
+	char fname[2060];
 	int eof = 0;
 	uint32_t size_expanded;
 	int start, end;
@@ -201,12 +201,12 @@ int expand_files(FILE* f_infile, const char* mode)
 	uint8_t* p_compressed;
 	uint8_t* p_expanded;
 
+	chunk_table_t chunk_table = chnktbl_init(f_infile);
+
 	/* Decode mode argument. */
 	char* _mode = strdup(mode);
 	char* str_start = strtok(_mode, ":");
 	char* str_end = strtok(NULL, ":");
-
-	chunk_table_t chunk_table = chnktbl_init(f_infile);
 	if (strcmp(str_start, "all")){
 
 		if (strlen(str_start) == 0)
@@ -222,15 +222,18 @@ int expand_files(FILE* f_infile, const char* mode)
 		start = 0;
 		end = chnktbl_cnt_file(&chunk_table);
 	}
+
 	chnktbl_file_seek(&chunk_table, start);
 
 	for (int image = start; image < end; image++){
-		sprintf(fname, "%04d.PVR", image);
+		sprintf(fname, "%s%04d.PVR", folder, image);
 
 		if ((f_outfile=fopen(fname,"wb"))==NULL) {
-			printf("Error opening output %s\n",fname);
+			printf("Error opening output %s. Make sure the target folder exists.\n",fname);
 			return EXIT_FAILURE;
 		}
+
+		printf("Expanding %s\n", fname);
 
 		while (!eof){
 			chunk = chnktbl_next_chunk(&chunk_table, &eof);

@@ -16,8 +16,9 @@
  * @param	mode			Mode selection string. "start:end" or "all".
  * @return 	Status
  */
-int expand_files(FILE* f_infile, const char* mode);
+int expand_files(FILE* f_infile, const char* mode, const char* folder);
 
 void compress_file(FILE* f_infile, FILE* f_outfile, size_t chunk_size);
+int compress_folder(FILE* fcompressed, const char* dir);
 
 #endif /* DC_RAH_COMP_TOOL_H_ */
